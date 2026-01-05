@@ -113,8 +113,8 @@ def build_map(heat_points, kantor_points, center_lat, center_lon, zoom):
 # =======================
 # APP
 # =======================
-st.set_page_config(page_title="Peta Konsumen BCAF", layout="wide")
-st.title("📍 Visualisasi Sebaran Konsumen BCAF")
+st.set_page_config(page_title="Peta Konsumen", layout="wide")
+st.title("📍 Visualisasi Sebaran Konsumen")
 
 try:
     df_konsumen_all, df_kantor_all = load_and_prepare_data()
@@ -210,7 +210,7 @@ try:
     # =======================
     st.sidebar.markdown("---")
     st.sidebar.metric("📌 Konsumen", f"{len(df_konsumen):,}")
-    st.sidebar.metric("🏢 Kantor", f"{len(df_kantor_final):,}")
+    st.sidebar.metric("🏢 Cabang", f"{len(df_kantor_final):,}")
 
     # =======================
     # VALIDASI
