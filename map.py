@@ -1,15 +1,15 @@
 import streamlit as st
 import pandas as pd
 import folium
-from folium import Marker
-from folium.plugins import HeatMap
+from folium import CircleMarker, FeatureGroup
 from streamlit_folium import st_folium
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 
 # =======================
 # CONFIG
 # =======================
-MAX_HEAT_POINTS = 6000
-MAP_ZOOM = 11
+MAX_POINTS_PER_KANTOR = 3000
 
 # =======================
 # HELPER
@@ -18,57 +18,39 @@ def extract_lat_lon(lokasi_str):
     try:
         lat, lon = map(float, str(lokasi_str).split(","))
         return lat, lon
-    except:
+    except Exception:
         return None, None
 
+def normalize_postal_code(series: pd.Series) -> pd.Series:
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .str.zfill(5)
+    )
+
 # =======================
-# LOAD & PREP DATA
+# LOAD DATA
 # =======================
 @st.cache_data(show_spinner=False)
-def load_and_prepare_data():
+def load_data():
     df_konsumen = pd.read_excel("Data ZipCode.xlsx")
     df_kantor   = pd.read_excel("master_zip.xlsx", sheet_name="kantor")
     df_zip      = pd.read_excel("master_zip.xlsx", sheet_name="Sheet1")
 
-    # Normalisasi kolom
     df_konsumen.columns = df_konsumen.columns.str.strip().str.upper()
     df_kantor.columns   = df_kantor.columns.str.strip().str.upper()
     df_zip.columns      = df_zip.columns.str.strip()
 
-    # Filter realisasi
     if "REALISASIDATE" in df_konsumen.columns:
         df_konsumen["REALISASIDATE"] = pd.to_datetime(
-            df_konsumen["REALISASIDATE"],
-            errors="coerce",
-            dayfirst=True
+            df_konsumen["REALISASIDATE"], errors="coerce", dayfirst=True
         )
         df_konsumen = df_konsumen[df_konsumen["REALISASIDATE"].notna()]
 
-    # Kode pos
-    if "KODEPOS" in df_konsumen.columns:
-        df_konsumen["KODEPOS"] = df_konsumen["KODEPOS"].astype(str).str.strip()
+    df_konsumen["KODEPOS"] = normalize_postal_code(df_konsumen["KODEPOS"])
+    df_zip["postal_code"] = normalize_postal_code(df_zip["postal_code"])
 
-    df_zip["postal_code"] = df_zip["postal_code"].astype(str).str.strip()
-
-    # KONSUMEN
-    df_konsumen["KODEPOS"] = (
-        df_konsumen["KODEPOS"]
-        .astype(str)
-        .str.replace(r"\.0$", "", regex=True)
-        .str.strip()
-        .str.zfill(5)
-    )
-
-    # MASTER ZIP
-    df_zip["postal_code"] = (
-        df_zip["postal_code"]
-        .astype(str)
-        .str.replace(r"\.0$", "", regex=True)
-        .str.strip()
-        .str.zfill(5)
-    )
-
-    # Merge lat lon konsumen
     df_konsumen = df_konsumen.merge(
         df_zip[["postal_code", "Latitude", "Longitude"]],
         left_on="KODEPOS",
@@ -80,15 +62,13 @@ def load_and_prepare_data():
     df_konsumen["lon"] = pd.to_numeric(df_konsumen["Longitude"], errors="coerce")
     df_konsumen = df_konsumen[df_konsumen["lat"].notna() & df_konsumen["lon"].notna()]
 
-    # Lat lon kantor
     if "LOKASI" in df_kantor.columns:
         df_kantor[["lat", "lon"]] = df_kantor["LOKASI"].apply(
             lambda x: pd.Series(extract_lat_lon(x))
         )
     df_kantor = df_kantor[df_kantor["lat"].notna() & df_kantor["lon"].notna()]
 
-    # Normalisasi text filter
-    for col in ["CABANG", "NAMA KANTOR"]:
+    for col in ["PRODUK", "CABANG", "NAMA KANTOR"]:
         if col in df_konsumen.columns:
             df_konsumen[col] = df_konsumen[col].astype(str).str.strip().str.upper()
         if col in df_kantor.columns:
@@ -97,173 +77,178 @@ def load_and_prepare_data():
     return df_konsumen, df_kantor
 
 # =======================
-# BUILD MAP
+# APP
 # =======================
-@st.cache_data(show_spinner=False)
-def build_map(heat_points, kantor_points, center_lat, center_lon):
-    m = folium.Map(
-        location=[center_lat, center_lon],
-        zoom_start=MAP_ZOOM,
-        tiles="CartoDB positron"
-    )
+st.set_page_config(page_title="Sebaran Konsumen per Kantor", layout="wide")
+st.title("📍 Sebaran Konsumen per Kantor")
 
-    if heat_points:
-        HeatMap(
-            heat_points,
-            radius=12,
-            blur=15,
-            min_opacity=0.3
-        ).add_to(m)
-
-    for kantor in kantor_points:
-        Marker(
-            location=kantor["loc"],
-            popup=kantor["popup"],
-            icon=folium.Icon(color="red", icon="building", prefix="fa")
-        ).add_to(m)
-
-    return m
+df_konsumen, df_kantor = load_data()
 
 # =======================
-# STREAMLIT UI
+# SIDEBAR FILTER
 # =======================
-st.set_page_config(page_title="Peta Konsumen", layout="wide")
-st.title("📍 Visualisasi Sebaran Konsumen BCAF")
+st.sidebar.header("🔎 Filter")
 
-try:
-    df_konsumen, df_kantor = load_and_prepare_data()
+# ---- PRODUK ----
+produk_opsi = ["ALL"] + sorted(df_konsumen["PRODUK"].unique())
+selected_produk = st.sidebar.selectbox("Produk", produk_opsi)
 
-    # =======================
-    # SIDEBAR FILTER (FINAL)
-    # =======================
-    st.sidebar.header("🔎 Filter Data")
+if selected_produk != "ALL":
+    df_konsumen = df_konsumen[df_konsumen["PRODUK"] == selected_produk]
 
-    # -----------------------
-    # 1️⃣ PRODUK
-    # -----------------------
-    daftar_produk = (
-        sorted(df_konsumen["PRODUK"].dropna().unique().tolist())
-        if "PRODUK" in df_konsumen.columns else []
+# ---- KANTOR ----
+kantor_opsi = ["ALL"] + sorted(df_kantor["NAMA KANTOR"].unique())
+selected_kantor = st.sidebar.selectbox("Kantor", kantor_opsi)
+
+# =======================
+# MAP INIT
+# =======================
+center_lat = df_konsumen["lat"].mean()
+center_lon = df_konsumen["lon"].mean()
+
+m = folium.Map(
+    location=[center_lat, center_lon],
+    zoom_start=6,
+    tiles="CartoDB positron"
+)
+
+# =======================
+# COLOR MAP PER KANTOR (KONTRAS, 6 WARNA)
+# =======================
+kantor_list = sorted(df_kantor["NAMA KANTOR"].unique())
+
+PALETTE_6 = [
+    "#1f77b4",  # biru
+    "#d62728",  # merah
+    "#2ca02c",  # hijau
+    "#ff7f0e",  # oranye
+    "#9467bd",  # ungu
+    "#17becf",  # cyan
+]
+
+warna_kantor = {
+    kantor: PALETTE_6[i % len(PALETTE_6)]
+    for i, kantor in enumerate(kantor_list)
+}
+
+# =======================
+# DRAW KONSUMEN PER KANTOR
+# =======================
+for kantor in kantor_list:
+
+    # 👉 FILTER KANTOR (INI PATCH UTAMA)
+    if selected_kantor != "ALL" and kantor != selected_kantor:
+        continue
+
+    df_kantor_k = df_kantor[df_kantor["NAMA KANTOR"] == kantor]
+    cabang_list = df_kantor_k["CABANG"].unique().tolist()
+
+    df_kons_k = df_konsumen[df_konsumen["CABANG"].isin(cabang_list)]
+
+    if df_kons_k.empty:
+        continue
+
+    if len(df_kons_k) > MAX_POINTS_PER_KANTOR:
+        df_kons_k = df_kons_k.sample(MAX_POINTS_PER_KANTOR, random_state=42)
+
+    fg = FeatureGroup(name=kantor)
+
+    for _, row in df_kons_k.iterrows():
+        CircleMarker(
+            location=[row["lat"], row["lon"]],
+            radius=3,
+            color=warna_kantor[kantor],
+            fill=True,
+            fill_color=warna_kantor[kantor],
+            fill_opacity=0.6,
+            weight=0,
+            tooltip=f"Kantor: {kantor} | Cabang: {row['CABANG']}"
+        ).add_to(fg)
+
+    fg.add_to(m)
+
+# =======================
+# MARKER KANTOR
+# =======================
+for _, row in df_kantor.iterrows():
+    if selected_kantor != "ALL" and row["NAMA KANTOR"] != selected_kantor:
+        continue
+
+    folium.Marker(
+        location=[row["lat"], row["lon"]],
+        popup=row["NAMA KANTOR"],
+        icon=folium.Icon(
+            color="black",
+            icon="building",
+            prefix="fa"
+        )
+    ).add_to(m)
+
+# =======================
+# HITUNG JUMLAH KONSUMEN PER KANTOR
+# =======================
+data_kantor_count = []
+
+for kantor in kantor_list:
+    if selected_kantor != "ALL" and kantor != selected_kantor:
+        continue
+
+    df_kantor_k = df_kantor[df_kantor["NAMA KANTOR"] == kantor]
+    cabang_list = df_kantor_k["CABANG"].unique().tolist()
+
+    jumlah = df_konsumen[df_konsumen["CABANG"].isin(cabang_list)].shape[0]
+
+    if jumlah > 0:
+        data_kantor_count.append({
+            "KANTOR": kantor,
+            "JUMLAH": jumlah,
+            "WARNA": warna_kantor[kantor]
+        })
+
+df_legend = (
+    pd.DataFrame(data_kantor_count)
+    .sort_values("JUMLAH", ascending=False)
+)
+
+# =======================
+# RENDER MAP
+# =======================
+st.subheader("🗺️ Peta Sebaran Konsumen per Kantor")
+st_folium(
+    m,
+    use_container_width=True,
+    height=650,
+    returned_objects=[],   # << ini kuncinya
+    key="map"              # optional tapi bagus untuk state
+)
+
+# =======================
+# SIDEBAR LEGEND
+# =======================
+total_konsumen = df_konsumen.shape[0]
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎨 Legend Kantor")
+
+for _, row in df_legend.iterrows():
+    st.sidebar.markdown(
+        f"""
+        <div style="display:flex; align-items:center; margin-bottom:4px;">
+            <div style="
+                width:12px;
+                height:12px;
+                background:{row['WARNA']};
+                margin-right:8px;
+            "></div>
+            <div style="font-size:13px;">
+                {row['KANTOR']} ({row['JUMLAH']:,})
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
-    selected_produk = st.sidebar.multiselect(
-        "Pilih Produk",
-        daftar_produk,
-        default=daftar_produk
-    )
-
-    if selected_produk:
-        df_konsumen = df_konsumen[df_konsumen["PRODUK"].isin(selected_produk)]
-    else:
-        st.warning("Pilih minimal satu produk")
-        st.stop()
-
-    # -----------------------
-    # 2️⃣ NAMA KANTOR
-    # -----------------------
-    daftar_kantor = (
-        sorted(df_kantor["NAMA KANTOR"].dropna().unique().tolist())
-        if "NAMA KANTOR" in df_kantor.columns else []
-    )
-
-    selected_kantor = st.sidebar.selectbox(
-        "Pilih Nama Kantor",
-        ["ALL"] + daftar_kantor
-    )
-
-    if selected_kantor != "ALL":
-        df_kantor = df_kantor[df_kantor["NAMA KANTOR"] == selected_kantor]
-
-    # -----------------------
-    # 3️⃣ CABANG
-    # -----------------------
-    daftar_cabang = (
-        sorted(df_kantor["CABANG"].dropna().unique().tolist())
-        if "CABANG" in df_kantor.columns else []
-    )
-
-    selected_cabang = st.sidebar.multiselect(
-        "Pilih Cabang",
-        daftar_cabang,
-        default=daftar_cabang
-    )
-
-    if selected_cabang:
-        if "CABANG" in df_kantor.columns:
-            df_kantor = df_kantor[df_kantor["CABANG"].isin(selected_cabang)]
-    else:
-        st.warning("Pilih minimal satu cabang")
-        st.stop()
-
-    # -----------------------
-    # INFO SIDEBAR
-    # -----------------------
-    st.sidebar.markdown("---")
-    st.sidebar.caption(f"📌 Konsumen: {len(df_konsumen):,}")
-    st.sidebar.caption(f"🏢 Kantor: {len(df_kantor):,}")
-
-    # =======================
-    # VALIDASI DATA
-    # =======================
-    if df_konsumen.empty and df_kantor.empty:
-        st.warning("Tidak ada data untuk filter yang dipilih")
-        st.stop()
-
-    # =======================
-    # HEATMAP
-    # =======================
-    heat_df = df_konsumen[["lat", "lon"]]
-
-    if len(heat_df) > MAX_HEAT_POINTS:
-        heat_df = heat_df.sample(MAX_HEAT_POINTS, random_state=42)
-
-    heat_points = heat_df.values.tolist()
-
-    # =======================
-    # KANTOR MARKER
-    # =======================
-    kantor_points = [
-        {
-            "loc": [row["lat"], row["lon"]],
-            "popup": row.get("NAMA KANTOR", "Kantor")
-        }
-        for _, row in df_kantor.iterrows()
-    ]
-
-    # =======================
-    # CENTER MAP
-    # =======================
-    if not df_kantor.empty:
-        center_lat = df_kantor["lat"].mean()
-        center_lon = df_kantor["lon"].mean()
-    else:
-        center_lat = df_konsumen["lat"].mean()
-        center_lon = df_konsumen["lon"].mean()
-
-    # =======================
-    # BUILD MAP
-    # =======================
-    m = build_map(
-        heat_points,
-        kantor_points,
-        center_lat,
-        center_lon
-    )
-
-    st.subheader("🗺️ Peta Lokasi")
-    st_folium(
-        m,
-        use_container_width=True,
-        height=650,
-        returned_objects=[]
-    )
-
-    col1, col2 = st.columns(2)
-    col1.metric("Jumlah Konsumen", len(df_konsumen))
-
-except Exception as e:
-    st.error(f"Terjadi error: {e}")
-
+st.sidebar.caption(f"👥 Total Konsumen: **{total_konsumen:,}**")
 
 
 
