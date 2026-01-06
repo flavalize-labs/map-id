@@ -162,7 +162,10 @@ for kantor in kantor_list:
             fill_color=warna_kantor[kantor],
             fill_opacity=0.6,
             weight=0,
-            tooltip=f"Kantor: {kantor} | Cabang: {row['CABANG']}"
+            tooltip=(
+                f"Cabang: {row['CABANG']}<br>"
+                f"APPID: {row.get('APPID', '-')}"
+            )
         ).add_to(fg)
 
     fg.add_to(m)
