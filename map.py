@@ -155,7 +155,7 @@ df_map2 = df_map2.drop_duplicates(subset=["CABANG"])
 df_konsumen = df_konsumen.merge(df_map2, on="CABANG", how="left")
 
 # =======================
-# Kantor valid untuk marker & meta (marker "pasti muncul" jika koordinat valid)
+# Kantor valid untuk marker & meta
 # =======================
 df_kantor_valid = df_kantor[
     df_kantor["NAMA KANTOR"].notna() &
@@ -163,7 +163,6 @@ df_kantor_valid = df_kantor[
     df_kantor["LON"].notna()
 ].copy()
 
-# Lookup kantor -> {ID, LAT, LON}
 kantor_meta = (
     df_kantor_valid[["NAMA KANTOR", "ID", "LAT", "LON"]]
     .drop_duplicates("NAMA KANTOR")
@@ -171,7 +170,6 @@ kantor_meta = (
     .to_dict("index")
 )
 
-# kantor_id -> nama kantor
 kantor_id_to_name = (
     df_kantor_valid[["ID", "NAMA KANTOR"]]
     .assign(ID=lambda d: d["ID"].astype(str))
@@ -187,17 +185,17 @@ selected_kantor_id = None
 if selected_kantor != "ALL":
     if selected_kantor in kantor_meta:
         selected_kantor_id = str(kantor_meta[selected_kantor]["ID"])
-        df_konsumen_plot = df_konsumen[df_konsumen["KANTOR_ID"].astype(str) == selected_kantor_id]
+        df_konsumen_plot_base = df_konsumen[df_konsumen["KANTOR_ID"].astype(str) == selected_kantor_id]
     else:
-        df_konsumen_plot = df_konsumen.iloc[0:0]  # kosong
+        df_konsumen_plot_base = df_konsumen.iloc[0:0]  # kosong
 else:
-    df_konsumen_plot = df_konsumen
+    df_konsumen_plot_base = df_konsumen
 
 # =======================
 # TOTAL APLIKASI (ikut filter produk + kantor)
 # =======================
 st.sidebar.markdown("---")
-st.sidebar.metric("Total Aplikasi", f"{df_konsumen_plot.shape[0]:,}")
+st.sidebar.metric("Total Aplikasi", f"{df_konsumen_plot_base.shape[0]:,}")
 
 # =======================
 # MAP INIT (auto-center & zoom saat pilih kantor)
@@ -207,12 +205,12 @@ if selected_kantor != "ALL" and selected_kantor in kantor_meta:
     center_lon = float(kantor_meta[selected_kantor]["LON"])
     zoom_start = 12
 else:
-    if not df_konsumen_plot.empty:
-        center_lat = float(df_konsumen_plot["lat"].mean())
-        center_lon = float(df_konsumen_plot["lon"].mean())
+    if not df_konsumen_plot_base.empty:
+        center_lat = float(df_konsumen_plot_base["lat"].mean())
+        center_lon = float(df_konsumen_plot_base["lon"].mean())
         zoom_start = 6
     else:
-        center_lat, center_lon, zoom_start = -2.5, 118.0, 5  # fallback Indonesia
+        center_lat, center_lon, zoom_start = -2.5, 118.0, 5
 
 m = folium.Map(
     location=[center_lat, center_lon],
@@ -221,39 +219,45 @@ m = folium.Map(
 )
 
 # =======================
-# COLOR MAP PER KANTOR (AUTO) - pakai kantor valid
+# COLOR MAP PER KANTOR (AUTO)
 # =======================
 kantor_list = sorted(df_kantor_valid["NAMA KANTOR"].unique())
 cmap_n = max(1, len(kantor_list))
 cmap = cm.get_cmap("tab20", cmap_n)
-
 warna_kantor = {kantor: mcolors.to_hex(cmap(i)) for i, kantor in enumerate(kantor_list)}
 
 # =======================
-# Siapkan nama kantor di konsumen_plot untuk grouping cepat
+# Siapkan nama kantor untuk base dataset (dipakai buat legend & map)
 # =======================
-df_konsumen_plot = df_konsumen_plot.copy()
-df_konsumen_plot["KANTOR_ID_STR"] = df_konsumen_plot["KANTOR_ID"].astype(str)
-df_konsumen_plot["NAMA_KANTOR"] = df_konsumen_plot["KANTOR_ID_STR"].map(kantor_id_to_name)
-df_konsumen_plot = df_konsumen_plot[df_konsumen_plot["NAMA_KANTOR"].notna()]
+df_konsumen_plot_base = df_konsumen_plot_base.copy()
+df_konsumen_plot_base["KANTOR_ID_STR"] = df_konsumen_plot_base["KANTOR_ID"].astype(str)
+df_konsumen_plot_base["NAMA_KANTOR"] = df_konsumen_plot_base["KANTOR_ID_STR"].map(kantor_id_to_name)
+df_konsumen_plot_base = df_konsumen_plot_base[df_konsumen_plot_base["NAMA_KANTOR"].notna()]
+
+# Pisahkan:
+# - FULL untuk legend (akurat)
+# - MAP untuk render (boleh sampling)
+df_konsumen_plot_full = df_konsumen_plot_base
+df_konsumen_plot_map  = df_konsumen_plot_base
 
 # =======================
-# SPEED UP: sampling global saat ALL
+# SPEED UP: sampling global saat ALL (map saja)
 # =======================
-if selected_kantor == "ALL" and len(df_konsumen_plot) > 30000:
-    df_konsumen_plot = df_konsumen_plot.sample(30000, random_state=42)
+if selected_kantor == "ALL" and len(df_konsumen_plot_map) > 30000:
+    df_konsumen_plot_map = df_konsumen_plot_map.sample(30000, random_state=42)
 
 # =======================
-# DRAW KONSUMEN (lebih cepat: groupby kantor, itertuples, sample per kantor)
+# DRAW KONSUMEN (render map pakai df_konsumen_plot_map)
 # =======================
 bounds_points = []
-has_appid = "APPID" in df_konsumen_plot.columns
+has_appid = "APPID" in df_konsumen_plot_map.columns
 
-for kantor_name, df_kons_k in df_konsumen_plot.groupby("NAMA_KANTOR"):
+for kantor_name, df_kons_k in df_konsumen_plot_map.groupby("NAMA_KANTOR"):
     if selected_kantor != "ALL" and kantor_name != selected_kantor:
         continue
 
-    if len(df_kons_k) > MAX_POINTS_PER_KANTOR:
+    # sampling per kantor masih kepakai untuk mode kantor spesifik
+    if selected_kantor != "ALL" and len(df_kons_k) > MAX_POINTS_PER_KANTOR:
         df_kons_k = df_kons_k.sample(MAX_POINTS_PER_KANTOR, random_state=42)
 
     fg = FeatureGroup(name=kantor_name)
@@ -283,7 +287,7 @@ for kantor_name, df_kons_k in df_konsumen_plot.groupby("NAMA_KANTOR"):
     fg.add_to(m)
 
 # =======================
-# MARKER KANTOR (pasti muncul jika koordinat valid)
+# MARKER KANTOR
 # =======================
 if selected_kantor != "ALL":
     if selected_kantor in kantor_meta:
@@ -296,14 +300,12 @@ if selected_kantor != "ALL":
             icon=folium.Icon(color="black", icon="building", prefix="fa")
         ).add_to(m)
 
-        # Paksa zoom dekat ke titik kantor (bukan ikut sebaran konsumen)
-        delta = 0.45  # kamu bisa adjust: 0.02 lebih dekat, 0.05 lebih jauh
+        # Paksa zoom dekat ke titik kantor (biarkan sesuai setting kamu)
+        delta = 0.45
         m.fit_bounds([[lat0 - delta, lon0 - delta], [lat0 + delta, lon0 + delta]])
-
     else:
         st.warning(f"Koordinat kantor '{selected_kantor}' tidak valid / tidak ditemukan di sheet 'alamat'.")
 else:
-    # ALL: gambar semua kantor valid
     for _, row in df_kantor_valid.iterrows():
         folium.Marker(
             location=[row["LAT"], row["LON"]],
@@ -311,7 +313,6 @@ else:
             icon=folium.Icon(color="black", icon="building", prefix="fa")
         ).add_to(m)
 
-    # Auto zoom hanya untuk mode ALL (fit ke semua titik yang sudah kamu kumpulkan)
     if bounds_points:
         lats = [p[0] for p in bounds_points]
         lons = [p[1] for p in bounds_points]
@@ -328,21 +329,20 @@ st_folium(
     use_container_width=True,
     height=650,
     returned_objects=[],
-    key=f"map_{selected_produk}_{selected_kantor}"  # <-- penting: key dinamis
+    key=f"map_{selected_produk}_{selected_kantor}"  # key dinamis biar viewport ikut update
 )
 
-
 # =======================
-# SIDEBAR LEGEND (Top N) - cepat (groupby)
+# SIDEBAR LEGEND (Top N) - pakai FULL (akurat)
 # =======================
 st.sidebar.markdown("---")
 st.sidebar.subheader(f"🎨 (Top {TOP_N_LEGEND})")
 
-if df_konsumen_plot.empty:
+if df_konsumen_plot_full.empty:
     st.sidebar.caption("Tidak ada data untuk ditampilkan.")
 else:
     df_counts = (
-        df_konsumen_plot.groupby("NAMA_KANTOR")
+        df_konsumen_plot_full.groupby("NAMA_KANTOR")
         .size()
         .reset_index(name="JUMLAH")
         .sort_values("JUMLAH", ascending=False)
@@ -376,3 +376,5 @@ else:
                 """,
                 unsafe_allow_html=True
             )
+
+
