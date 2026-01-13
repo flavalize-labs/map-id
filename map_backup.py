@@ -49,9 +49,75 @@ def safe_fit_bounds(m, bounds):
 # =======================
 @st.cache_data(show_spinner=False)
 def load_data():
-    df_konsumen = pd.read_parquet("konsumen.parquet")
-    df_kantor   = pd.read_parquet("kantor.parquet")
-    df_mapping  = pd.read_parquet("mapping.parquet")
+    # --- Konsumen (baca sekali)
+    df_konsumen = pd.read_excel(
+        "Data ZipCode.xlsx",
+        dtype={"KODEPOS": "string", "CABANG": "string", "PRODUK": "string"},
+    )
+
+    # --- Master zip (baca sekali, parse per sheet)
+    xls = pd.ExcelFile("master_zip.xlsx")
+    df_mapping = xls.parse("mapping", dtype={"CABANG": "string", "KANTOR_ID": "string"})
+    df_kantor  = xls.parse("alamat")
+    df_zip     = xls.parse("Sheet1", dtype={"postal_code": "string"})
+
+    # Normalisasi header
+    df_konsumen.columns = df_konsumen.columns.str.strip().str.upper()
+    df_mapping.columns  = df_mapping.columns.str.strip().str.upper()
+    df_kantor.columns   = df_kantor.columns.str.strip().str.upper()
+    df_zip.columns      = df_zip.columns.str.strip()
+
+    # Filter tanggal (kalau ada)
+    if "REALISASIDATE" in df_konsumen.columns:
+        df_konsumen["REALISASIDATE"] = pd.to_datetime(
+            df_konsumen["REALISASIDATE"], errors="coerce", dayfirst=True
+        )
+        df_konsumen = df_konsumen[df_konsumen["REALISASIDATE"].notna()]
+
+    # Konsistensi teks
+    for col in ["PRODUK", "CABANG"]:
+        if col in df_konsumen.columns:
+            df_konsumen[col] = df_konsumen[col].astype(str).str.strip().str.upper()
+
+    if "CABANG" in df_mapping.columns:
+        df_mapping["CABANG"] = df_mapping["CABANG"].astype(str).str.strip().str.upper()
+
+    if "KANTOR_ID" in df_mapping.columns:
+        df_mapping["KANTOR_ID"] = df_mapping["KANTOR_ID"].astype(str).str.strip()
+
+    if "NAMA KANTOR" in df_kantor.columns:
+        df_kantor["NAMA KANTOR"] = df_kantor["NAMA KANTOR"].astype(str).str.strip().str.upper()
+
+    # Normalisasi kodepos
+    if "KODEPOS" in df_konsumen.columns:
+        df_konsumen["KODEPOS"] = normalize_postal_code(df_konsumen["KODEPOS"])
+    if "postal_code" in df_zip.columns:
+        df_zip["postal_code"] = normalize_postal_code(df_zip["postal_code"])
+
+    # Merge zipcode -> lat/lon konsumen
+    df_konsumen = df_konsumen.merge(
+        df_zip[["postal_code", "Latitude", "Longitude"]],
+        left_on="KODEPOS",
+        right_on="postal_code",
+        how="left"
+    )
+    df_konsumen["lat"] = pd.to_numeric(df_konsumen["Latitude"], errors="coerce")
+    df_konsumen["lon"] = pd.to_numeric(df_konsumen["Longitude"], errors="coerce")
+    df_konsumen = df_konsumen[df_konsumen["lat"].notna() & df_konsumen["lon"].notna()]
+
+    # Kantor (parsing koordinat robust)
+    for col in ["LATITUDE", "LONGITUDE"]:
+        if col in df_kantor.columns:
+            df_kantor[col] = (
+                df_kantor[col].astype(str)
+                .str.strip()
+                .str.replace(",", ".", regex=False)
+                .str.replace(r"[^0-9\.\-]+", "", regex=True)
+            )
+
+    df_kantor["LAT"] = pd.to_numeric(df_kantor.get("LATITUDE"), errors="coerce")
+    df_kantor["LON"] = pd.to_numeric(df_kantor.get("LONGITUDE"), errors="coerce")
+
     return df_konsumen, df_kantor, df_mapping
 
 # =======================
@@ -77,6 +143,16 @@ if selected_produk != "ALL":
 # ---- KANTOR ----
 kantor_opsi = ["ALL"] + sorted(df_kantor["NAMA KANTOR"].dropna().unique())
 selected_kantor = st.sidebar.selectbox("Kantor", kantor_opsi)
+
+# =======================
+# Optimasi utama: map CABANG -> KANTOR_ID sekali
+# =======================
+df_map2 = df_mapping[["CABANG", "KANTOR_ID"]].dropna().copy()
+df_map2["CABANG"] = df_map2["CABANG"].astype(str).str.strip().str.upper()
+df_map2["KANTOR_ID"] = df_map2["KANTOR_ID"].astype(str).str.strip()
+df_map2 = df_map2.drop_duplicates(subset=["CABANG"])
+
+df_konsumen = df_konsumen.merge(df_map2, on="CABANG", how="left")
 
 # =======================
 # Kantor valid untuk marker & meta
